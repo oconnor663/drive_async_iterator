@@ -1,0 +1,15 @@
+[package]
+name = "drive_async_iterator"
+version = "0.0.0"
+authors = ["Jack O'Connor <oconnor663@gmail.com>"]
+description = "an async macro for getting `next`-like behavior from `for await`"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+edition = "2024"
+
+[dependencies]
+drive_async_iterator_impl = { version = "0", path = "impl" }
+
+[dev-dependencies]
+futures = { version = "0.3" }
+tokio = { version = "1.48.0", features = ["full"] }
