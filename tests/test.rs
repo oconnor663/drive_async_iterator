@@ -6,8 +6,8 @@
 
 use drive_async_iterator::drive;
 use futures::stream::FuturesUnordered;
-use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep, timeout};
 
 #[tokio::test]
 async fn test_drive() {
@@ -27,7 +27,7 @@ async fn test_mutex() {
     async fn foo() {
         static LOCK: Mutex<()> = Mutex::const_new(());
         let _guard = LOCK.lock().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(10)).await;
     }
     let futures = FuturesUnordered::new();
     futures.push(foo());
@@ -56,4 +56,27 @@ async fn test_delayed_next() {
         assert_eq!(next().await, Some(42));
         assert_eq!(next().await, None);
     });
+}
+
+#[tokio::test]
+async fn test_cancelled_next() {
+    let futures = FuturesUnordered::new();
+    futures.push(async {
+        sleep(Duration::from_millis(10)).await;
+        42
+    });
+    let mut iterations = 0;
+    drive!(futures, {
+        // Call `next` in a loop with a tight timeout. It'll get cancelled several times before it
+        // eventually returns the item.
+        loop {
+            iterations += 1;
+            let one_ms = Duration::from_millis(1);
+            if let Ok(Some(x)) = timeout(one_ms, next()).await {
+                assert_eq!(x, 42);
+                break;
+            }
+        }
+    });
+    assert!(iterations > 5);
 }
