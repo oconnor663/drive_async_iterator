@@ -27,7 +27,7 @@ impl ToTokens for Drive {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         let Self { iterator, body } = self;
         let state = format_ident!("state", span = Span::mixed_site());
-        let iterator_future = format_ident!("iterator_future", span = Span::mixed_site());
+        let poll_next_future = format_ident!("poll_next_future", span = Span::mixed_site());
         let body_future = format_ident!("body_future", span = Span::mixed_site());
         tokens.extend(quote! {{
             // SAFETY: This struct must not be moved after this point.
@@ -38,20 +38,21 @@ impl ToTokens for Drive {
                     )
                 )
             };
-            let mut #iterator_future = ::core::pin::pin!(async {
+            let mut #poll_next_future = ::core::pin::pin!(async {
                 loop {
                     let mut state = #state.borrow_mut();
                     // NOTE: If `next` is cancelled, `item` might not get take immediately. In that
                     // case it might already be `Some`.
                     if state.next_item_wanted && state.item.is_none() {
-                        debug_assert!(state.item.is_none());
                         // NOTE: `DriveState` handles fusing and dropping `iterator` internally.
                         if let ::core::async_iter::PollNext::Item(item) = state.poll_next_once().await {
                             state.item = Some(item);
                             state.next_item_wanted = false;
+                            // At this point we're handing an item off to the body. We'd rather not
+                            // call `poll_progress` if the body is going to ask for another item
+                            // immediately, so we don't do it here. Instead, we do it in the outer
+                            // loop.
                         }
-                    } else {
-                        _ = state.poll_progress_once().await;
                     }
                     // `poll_next` or `poll_progress` above might have register a wakeup. If not,
                     // we'll rely entirely on wakeups from the body side, and on the fact that
@@ -88,10 +89,10 @@ impl ToTokens for Drive {
                         // item is ready. That's why we rely entirely on the `next_item_wanted`
                         // state flag, rather than polling the iterator directly here.
                         //
-                        // NOTE: We poll the iterator future before the body future. When `next` is
-                        // first called, we need to re-run the outer loop to give the body future a
-                        // chance to call `poll_next`. If it doesn't give us an item immediately,
-                        // it'll handle its own wakeups after that.
+                        // NOTE: We poll the poll-next-future before the body future. When `next`
+                        // is first called, we need to re-run the outer loop to give the body
+                        // future a chance to call `poll_next`. If it doesn't give us an item
+                        // immediately, it'll handle its own wakeups after that.
                         //
                         // NOTE: `next_item_wanted` might already be true if a previous call to
                         // `next` was cancelled. That's fine. We might also set it to `true` but
@@ -102,7 +103,7 @@ impl ToTokens for Drive {
                             state.next_item_wanted = true;
                             state.outer_loop_again = true;
                         }
-                        // Yield without arranging our own wakeup, trusting the iterator future to
+                        // Yield without arranging our own wakeup, trusting the poll-next-future to
                         // make progress for us.
                         //
                         // The awaits above are "fake" in that they're guaranteed to be ready
@@ -115,8 +116,8 @@ impl ToTokens for Drive {
                 #body
             });
             loop {
-                // Polling the iterator future is a no-op once the iterator is done.
-                _ = ::drive_async_iterator::_impl::poll_once(#iterator_future.as_mut()).await;
+                // Polling the poll-next-future is a no-op once the iterator is done.
+                _ = ::drive_async_iterator::_impl::poll_once(#poll_next_future.as_mut()).await;
                 let body_poll = ::drive_async_iterator::_impl::poll_once(#body_future.as_mut()).await;
                 if let ::core::task::Poll::Ready(output) = body_poll {
                     break output;
@@ -125,6 +126,11 @@ impl ToTokens for Drive {
                 if state.outer_loop_again {
                     state.outer_loop_again = false;
                     continue;
+                } else if !state.next_item_wanted {
+                    // The body is awaiting something other than `next`, possibly after some calls
+                    // to `next` have yielded items. This is where we call `poll_progress`, so that
+                    // in general we only call it once after a chain of ready items.
+                    _ = state.poll_progress_once().await;
                 }
                 // Either the iterator side is awaiting the next item, or the body side is awaiting
                 // something else, or both. They will wake us up.

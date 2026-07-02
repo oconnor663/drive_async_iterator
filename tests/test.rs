@@ -6,7 +6,10 @@
 
 use drive_async_iterator::drive;
 use futures::stream::FuturesUnordered;
-use tokio::sync::Mutex;
+use std::async_iter::{AsyncIterator, PollNext};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Duration, sleep, timeout};
 
 #[tokio::test]
@@ -79,6 +82,48 @@ async fn test_cancelled_next() {
         }
     });
     assert!(iterations > 5);
+}
+
+#[tokio::test]
+async fn test_poll_progress_after_item() {
+    struct ProgressAfterItem {
+        item_yielded: bool,
+        sender: Option<oneshot::Sender<()>>,
+    }
+    impl AsyncIterator for ProgressAfterItem {
+        type Item = ();
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> PollNext<()> {
+            if self.item_yielded {
+                PollNext::Pending
+            } else {
+                self.item_yielded = true;
+                PollNext::Item(())
+            }
+        }
+        fn poll_progress(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            if self.item_yielded
+                && let Some(sender) = self.sender.take()
+            {
+                _ = sender.send(());
+            }
+            Poll::Ready(())
+        }
+    }
+    let (sender, mut receiver) = oneshot::channel();
+    let iter = ProgressAfterItem {
+        item_yielded: false,
+        sender: Some(sender),
+    };
+    drive!(iter, {
+        assert_eq!(next().await, Some(()));
+        // At this point we've taken an item from the stream, but `poll_progress` hasn't yet been
+        // called. (It better for performance if we don't call it every time.)
+        assert!(receiver.try_recv().is_err());
+        // However, now we're going to go wait on something else, and we need to make sure
+        // `poll_progress` gets called "on the way out" so that in general it can register wakeups.
+        // If it doesn't, the channel setup in this test will deadlock.
+        receiver.await.unwrap();
+    });
 }
 
 #[tokio::test]
