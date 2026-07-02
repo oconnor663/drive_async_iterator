@@ -26,63 +26,112 @@ impl Parse for Drive {
 impl ToTokens for Drive {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         let Self { iterator, body } = self;
-        let for_await_proceed = format_ident!("for_await_proceed", span = Span::mixed_site());
-        let for_await_done = format_ident!("for_await_done", span = Span::mixed_site());
-        let outer_loop_again = format_ident!("outer_loop_again", span = Span::mixed_site());
-        let item = format_ident!("item", span = Span::mixed_site());
+        let state = format_ident!("state", span = Span::mixed_site());
+        let iterator_future = format_ident!("iterator_future", span = Span::mixed_site());
+        let body_future = format_ident!("body_future", span = Span::mixed_site());
         tokens.extend(quote! {{
-            let #for_await_proceed = ::core::sync::atomic::AtomicBool::new(false);
-            let #for_await_done = ::core::sync::atomic::AtomicBool::new(false);
-            let #outer_loop_again = ::core::sync::atomic::AtomicBool::new(false);
-            let #item = ::drive_async_iterator::_impl::AtomicRefCell::new(None);
-            let mut for_await_future = ::core::pin::pin!(async {
-                while !#for_await_proceed.load(::core::sync::atomic::Ordering::Relaxed) {
+            // SAFETY: This struct must not be moved after this point.
+            let #state = unsafe {
+                ::drive_async_iterator::_impl::AtomicRefCell::new(
+                    ::drive_async_iterator::_impl::DriveState::new(
+                        #iterator
+                    )
+                )
+            };
+            let mut #iterator_future = ::core::pin::pin!(async {
+                loop {
+                    let mut state = #state.borrow_mut();
+                    // NOTE: If `next` is cancelled, `item` might not get take immediately. In that
+                    // case it might already be `Some`.
+                    if state.next_item_wanted && state.item.is_none() {
+                        debug_assert!(state.item.is_none());
+                        // NOTE: `DriveState` handles fusing and dropping `iterator` internally.
+                        if let ::core::async_iter::PollNext::Item(item) = state.poll_next_once().await {
+                            state.item = Some(item);
+                            state.next_item_wanted = false;
+                        }
+                    } else {
+                        _ = state.poll_progress_once().await;
+                    }
+                    // `poll_next` or `poll_progress` above might have register a wakeup. If not,
+                    // we'll rely entirely on wakeups from the body side, and on the fact that
+                    // `next` sets `outer_loop_again`.
+                    //
+                    // The awaits above are "fake" in that they're guaranteed to be ready
+                    // immediately, but this one will actually yield control, so we don't want to
+                    // hold the `state` borrow across it.
+                    drop(state);
                     ::drive_async_iterator::_impl::pending_once().await;
                 }
-                // TODO: NOT CORRECT! WE NEED TO poll_progress BEFORE THE LOOP
-                // (also we want mutable access)
-                for await x in #iterator {
-                    let mut item_mut = #item.borrow_mut();
-                    debug_assert!(item_mut.is_none());
-                    *item_mut = Some(x);
-                    drop(item_mut);
-                    #for_await_proceed.store(false, ::core::sync::atomic::Ordering::Relaxed);
-                    while !#for_await_proceed.load(::core::sync::atomic::Ordering::Relaxed) {
-                        ::drive_async_iterator::_impl::pending_once().await;
-                    }
-                }
-                #for_await_done.store(true, ::core::sync::atomic::Ordering::Relaxed);
             });
-            let mut body_future = ::core::pin::pin!(async {
+            let mut #body_future = ::core::pin::pin!(async {
                 // Intentionally non-hygienic!
                 let next = async || {
-                    #for_await_proceed.store(true, ::core::sync::atomic::Ordering::Relaxed);
-                    #outer_loop_again.store(true, ::core::sync::atomic::Ordering::Relaxed);
+                    let mut first_iteration = true;
                     loop {
-                        if let Some(item) = #item.borrow_mut().take() {
+                        // NOTE: Even though we could call `poll_next` directly through the
+                        // `AtomicRefCell` here, we *shouldn't*, because this async function can be
+                        // cancelled. Once `poll_next` is called, we need to guarantee that we'll
+                        // keep calling it and not switch back to `poll_progress` before the next
+                        // item is ready. That's why we rely entirely on the `next_item_wanted`
+                        // state flag, rather than polling the iterator directly here.
+                        let mut state = #state.borrow_mut();
+                        if let Some(item) = state.item.take() {
                             return Some(item);
                         }
-                        if #for_await_done.load(::core::sync::atomic::Ordering::Relaxed) {
+                        if state.iterator_done() {
                             return None;
                         }
-                        // Yield without arranging a wakeup! The loop side has arranged one, and
-                        // the outer loop will poll it before it polls us again.
+                        // NOTE: Even though we could call `poll_next` directly through the
+                        // `AtomicRefCell` here, we *shouldn't*, because this async function can be
+                        // cancelled. Once `poll_next` is called, we need to guarantee that we'll
+                        // keep calling it and not switch back to `poll_progress` before the next
+                        // item is ready. That's why we rely entirely on the `next_item_wanted`
+                        // state flag, rather than polling the iterator directly here.
+                        //
+                        // Also, `next_item_wanted` might already be true if a previous call to
+                        // `next` was cancelled. That's fine.
+                        state.next_item_wanted = true;
+                        // We poll the iterator future before the body future. When `next` is first
+                        // called, we need to re-run the outer loop to give the body future a
+                        // chance to call `poll_next`. If it doesn't give us an item immediately,
+                        // it'll handle its own wakeups after that.
+                        if first_iteration {
+                            first_iteration = false;
+                            state.outer_loop_again = true;
+                        }
+                        // Yield without arranging our own wakeup, trusting the iterator future to
+                        // make progress for us.
+                        //
+                        // The awaits above are "fake" in that they're guaranteed to be ready
+                        // immediately, but this one will actually yield control, so we don't want
+                        // to hold the `state` borrow across it.
+                        drop(state);
                         ::drive_async_iterator::_impl::pending_once().await;
                     }
                 };
                 #body
             });
             loop {
-                if !#for_await_done.load(::core::sync::atomic::Ordering::Relaxed) {
-                    _ = ::drive_async_iterator::_impl::poll_once(for_await_future.as_mut()).await;
-                };
-                let body_poll = ::drive_async_iterator::_impl::poll_once(body_future.as_mut()).await;
+                // Polling the iterator future is a no-op once the iterator is done.
+                _ = ::drive_async_iterator::_impl::poll_once(#iterator_future.as_mut()).await;
+                let body_poll = ::drive_async_iterator::_impl::poll_once(#body_future.as_mut()).await;
                 if let ::core::task::Poll::Ready(output) = body_poll {
                     break output;
                 }
-                if !#outer_loop_again.swap(false, ::core::sync::atomic::Ordering::Relaxed) {
-                    ::drive_async_iterator::_impl::pending_once().await;
+                let mut state = #state.borrow_mut();
+                if state.outer_loop_again {
+                    state.outer_loop_again = false;
+                    continue;
                 }
+                // Either the iterator side is awaiting the next item, or the body side is awaiting
+                // something else, or both. They will wake us up.
+                //
+                // The awaits above are "fake" in that they're guaranteed to be ready immediately,
+                // but this one will actually yield control, so we don't want to hold the `state`
+                // borrow across it.
+                drop(state);
+                ::drive_async_iterator::_impl::pending_once().await;
             }
         }});
     }

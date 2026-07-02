@@ -5,6 +5,9 @@
 #![allow(unused_features)]
 
 use drive_async_iterator::drive;
+use futures::stream::FuturesUnordered;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn test_drive() {
@@ -17,4 +20,40 @@ async fn test_drive() {
         finished = true;
     });
     assert!(finished);
+}
+
+#[tokio::test]
+async fn test_mutex() {
+    async fn foo() {
+        static LOCK: Mutex<()> = Mutex::const_new(());
+        let _guard = LOCK.lock().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let futures = FuturesUnordered::new();
+    futures.push(foo());
+    futures.push(foo());
+    drive!(futures, {
+        while let Some(_) = next().await {
+            foo().await; // Should not deadlock here!
+        }
+    });
+}
+
+#[tokio::test]
+async fn test_delayed_next() {
+    let lock = Mutex::new(());
+    let futures = FuturesUnordered::new();
+    let guard = lock.lock().await;
+    futures.push(async {
+        drop(guard);
+        42
+    });
+    assert!(lock.try_lock().is_err());
+    drive!(futures, {
+        // `futures` should make progress even before the call to `next`, so `guard` should get
+        // dropped promptly. If not, we'll deadlock here.
+        let _guard = lock.lock().await;
+        assert_eq!(next().await, Some(42));
+        assert_eq!(next().await, None);
+    });
 }
