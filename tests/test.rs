@@ -1,3 +1,9 @@
+#![feature(async_iterator)]
+#![feature(async_for_loop)]
+#![feature(gen_blocks)]
+#![feature(yield_expr)]
+#![allow(unused_features)]
+
 use drive_async_iterator::drive;
 
 #[tokio::test]

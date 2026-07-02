@@ -11,10 +11,6 @@
 #![no_std]
 #![feature(async_iterator)]
 
-use atomic_refcell::AtomicRefCell;
-use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-
 /// The macro that this crate is all about
 ///
 /// See the [module-level documentation](crate) for details and examples.
@@ -23,7 +19,6 @@ pub use drive_async_iterator_impl::drive;
 /// Functions that are only intended for use by the macro
 #[doc(hidden)]
 pub mod _impl {
-    use super::*;
     use core::async_iter::{AsyncIterator, PollNext};
     use core::pin::Pin;
     use core::task::{Context, Poll};
@@ -36,7 +31,7 @@ pub mod _impl {
         PendingOnce { yielded: false }
     }
 
-    struct PendingOnce {
+    pub struct PendingOnce {
         yielded: bool,
     }
 
@@ -54,6 +49,11 @@ pub mod _impl {
         }
     }
 
+    #[inline]
+    pub fn poll_once<Fut>(fut: Pin<&mut Fut>) -> PollOnce<'_, Fut> {
+        PollOnce(fut)
+    }
+
     pub struct PollOnce<'a, Fut>(Pin<&'a mut Fut>);
 
     impl<Fut: Future> Future for PollOnce<'_, Fut> {
@@ -65,6 +65,11 @@ pub mod _impl {
         }
     }
 
+    #[inline]
+    pub fn poll_next_once<Iter>(iter: Pin<&mut Iter>) -> PollNextOnce<'_, Iter> {
+        PollNextOnce(iter)
+    }
+
     pub struct PollNextOnce<'a, Iter>(Pin<&'a mut Iter>);
 
     impl<Iter: AsyncIterator> Future for PollNextOnce<'_, Iter> {
@@ -73,6 +78,22 @@ pub mod _impl {
         #[inline]
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             Poll::Ready(self.0.as_mut().poll_next(cx))
+        }
+    }
+
+    #[inline]
+    pub fn poll_progress_once<Iter>(iter: Pin<&mut Iter>) -> PollProgressOnce<'_, Iter> {
+        PollProgressOnce(iter)
+    }
+
+    pub struct PollProgressOnce<'a, Iter>(Pin<&'a mut Iter>);
+
+    impl<Iter: AsyncIterator> Future for PollProgressOnce<'_, Iter> {
+        type Output = Poll<()>;
+
+        #[inline]
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Ready(self.0.as_mut().poll_progress(cx))
         }
     }
 }

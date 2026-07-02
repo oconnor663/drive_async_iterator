@@ -14,3 +14,20 @@ drive_async_iterator_impl = { version = "0", path = "impl" }
 [dev-dependencies]
 futures = { version = "0.3" }
 tokio = { version = "1.48.0", features = ["full"] }
+
+[patch.crates-io]
+futures = { path = "/home/jacko/futures-rs/futures" }
+futures-channel = { path = "/home/jacko/futures-rs/futures-channel" }
+futures-core = { path = "/home/jacko/futures-rs/futures-core" }
+futures-executor = { path = "/home/jacko/futures-rs/futures-executor" }
+futures-io = { path = "/home/jacko/futures-rs/futures-io" }
+futures-macro = { path = "/home/jacko/futures-rs/futures-macro" }
+futures-sink = { path = "/home/jacko/futures-rs/futures-sink" }
+futures-task = { path = "/home/jacko/futures-rs/futures-task" }
+futures-test = { path = "/home/jacko/futures-rs/futures-test" }
+futures-util = { path = "/home/jacko/futures-rs/futures-util" }
+tokio = { path = "/home/jacko/tokio/tokio" }
+tokio-macros = { path = "/home/jacko/tokio/tokio-macros" }
+tokio-stream = { path = "/home/jacko/tokio/tokio-stream" }
+tokio-test = { path = "/home/jacko/tokio/tokio-test" }
+tokio-util = { path = "/home/jacko/tokio/tokio-util" }
