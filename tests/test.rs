@@ -80,3 +80,13 @@ async fn test_cancelled_next() {
     });
     assert!(iterations > 5);
 }
+
+#[tokio::test]
+async fn test_concurrent_nexts() {
+    drive!(futures::stream::iter([1, 2]), {
+        let (option1, option2) = futures::future::join(next(), next()).await;
+        let mut items = [option1.unwrap(), option2.unwrap()];
+        items.sort();
+        assert_eq!(items, [1, 2]);
+    });
+}

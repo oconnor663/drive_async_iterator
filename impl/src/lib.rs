@@ -67,7 +67,6 @@ impl ToTokens for Drive {
             let mut #body_future = ::core::pin::pin!(async {
                 // Intentionally non-hygienic!
                 let next = async || {
-                    let mut first_iteration = true;
                     loop {
                         // NOTE: Even though we could call `poll_next` directly through the
                         // `AtomicRefCell` here, we *shouldn't*, because this async function can be
@@ -89,15 +88,18 @@ impl ToTokens for Drive {
                         // item is ready. That's why we rely entirely on the `next_item_wanted`
                         // state flag, rather than polling the iterator directly here.
                         //
-                        // Also, `next_item_wanted` might already be true if a previous call to
-                        // `next` was cancelled. That's fine.
-                        state.next_item_wanted = true;
-                        // We poll the iterator future before the body future. When `next` is first
-                        // called, we need to re-run the outer loop to give the body future a
+                        // NOTE: We poll the iterator future before the body future. When `next` is
+                        // first called, we need to re-run the outer loop to give the body future a
                         // chance to call `poll_next`. If it doesn't give us an item immediately,
                         // it'll handle its own wakeups after that.
-                        if first_iteration {
-                            first_iteration = false;
+                        //
+                        // NOTE: `next_item_wanted` might already be true if a previous call to
+                        // `next` was cancelled. That's fine. We might also set it to `true` but
+                        // then find that a concurrent call to `next` steals the item from us, so
+                        // we need to reset it. That's also fine. In the latter case we run the
+                        // outer loop yet again.
+                        if !state.next_item_wanted {
+                            state.next_item_wanted = true;
                             state.outer_loop_again = true;
                         }
                         // Yield without arranging our own wakeup, trusting the iterator future to
