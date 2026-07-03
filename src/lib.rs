@@ -75,6 +75,7 @@
 
 use atomic_refcell::AtomicRefCell;
 use core::async_iter::{AsyncIterator, PollNext};
+use core::pin::Pin;
 
 #[macro_export]
 macro_rules! drive {
@@ -182,6 +183,23 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, Iter> {
             _impl::pending_once().await;
         }
     }
+
+    pub fn with_pin_mut<F, Ret>(&self, f: F) -> Ret
+    where
+        F: FnOnce(Option<Pin<&mut Iter>>) -> Ret,
+    {
+        let mut state = self.state.borrow_mut();
+        f(state.iterator_pinned())
+    }
+
+    pub fn with_mut<F, Ret>(&self, f: F) -> Ret
+    where
+        F: FnOnce(Option<&mut Iter>) -> Ret,
+        Iter: Unpin,
+    {
+        let mut state = self.state.borrow_mut();
+        f(state.iterator_pinned().map(Pin::get_mut))
+    }
 }
 
 /// Functions that are only intended for use by the macro
@@ -221,7 +239,7 @@ pub mod _impl {
             }
         }
 
-        fn iterator_pinned(&mut self) -> Option<Pin<&mut Iter>> {
+        pub(crate) fn iterator_pinned(&mut self) -> Option<Pin<&mut Iter>> {
             if let Some(iter) = &mut self.iterator {
                 // SAFETY: `new` is unsafe, and this field is private.
                 Some(unsafe { Pin::new_unchecked(iter) })
