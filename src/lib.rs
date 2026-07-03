@@ -179,7 +179,7 @@
 //!             job = more_work() => {
 //!                 futures.with_mut(|maybe_futures: Option<_>| {
 //!                     let futures = maybe_futures.expect("never dropped");
-//!                     futures.push(job);
+//!                     futures.as_mut().push(job);
 //!                 });
 //!             }
 //!         }
@@ -189,10 +189,18 @@
 //! # }
 //! ```
 //!
+//! Note that calling `next` on a `NeverDone` async iterator will never return `None`. Instead,
+//! it'll block potentially forever waiting for the iterator to yield more items. (To make this
+//! work correctly, `NeverDone` stashes a [`Waker`] and invokes it whenever the inner async
+//! iterator might be mutated.) That's different from the behavior of `StreamExt::next` today,
+//! which returns `None` immediately in the empty case. The blocking behavior avoids accidental hot
+//! loops in some cases, but it can also cause some existing callers to block forever unexpectedly.
+//!
 //! [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 //! [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 //! [`with_pin_mut`]: DrivenAsyncIterator::with_pin_mut
 //! [`with_mut`]: DrivenAsyncIterator::with_mut
+//! [`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
 
 #![no_std]
 #![feature(async_iterator)]
@@ -200,7 +208,7 @@
 use atomic_refcell::AtomicRefCell;
 use core::async_iter::{AsyncIterator, PollNext};
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, Waker};
 
 /// Take ownership of an `AsyncIterator` and provide a handle with an async [`.next()`] method.
 ///
@@ -392,13 +400,17 @@ pin_project_lite::pin_project! {
     pub struct NeverDone<Iter> {
         #[pin]
         iter: Iter,
+        last_waker: Option<Waker>,
     }
 }
 
 impl<Iter> NeverDone<Iter> {
     /// Wrap an `AsyncIterator` with `NeverDone`.
     pub fn new(iter: Iter) -> Self {
-        Self { iter }
+        Self {
+            iter,
+            last_waker: None,
+        }
     }
 
     /// Consume the `NeverDone` and return the inner `AsyncIterator`.
@@ -406,9 +418,47 @@ impl<Iter> NeverDone<Iter> {
         self.iter
     }
 
+    /// Return a mutable reference to the inner `AsyncIterator`.
+    ///
+    /// When `NeverDone` is polled, it stashes a [`Waker`], and when this method is called, it
+    /// invokes that `Waker`. This ensures that callers who are blocked in `next` wake up and
+    /// re-poll, in case this mutation has unblocked them.
+    ///
+    /// Note that this is a best-effort mechanism, but it's not perfect. If the inner iterator
+    /// holds something like an `Arc<Mutex<_>>`, which might be mutated without this wrapper ever
+    /// knowing about it, something could put it in a ready-to-yield-items state without waking up
+    /// callers blocked in `next`. The proper solution to this problem is for containers like
+    /// `FuturesUnordered` to stash their own wakers and manage their own `Pending`-vs-`Done`
+    /// state, so that e.g. `for await` loops work naturally, and `NeverDone` isn't needed.
+    ///
+    /// [`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
+    pub fn as_mut(&mut self) -> &mut Iter {
+        if let Some(waker) = self.last_waker.take() {
+            waker.wake();
+        }
+        &mut self.iter
+    }
+
     /// Return a pinned reference to the inner `AsyncIterator`.
+    ///
+    /// When `NeverDone` is polled, it stashes a [`Waker`], and when this method is called, it
+    /// invokes that `Waker`. This ensures that callers who are blocked in `next` wake up and
+    /// re-poll, in case this mutation has unblocked them.
+    ///
+    /// Note that this is a best-effort mechanism, but it's not perfect. If the inner iterator
+    /// holds something like an `Arc<Mutex<_>>`, which might be mutated without this wrapper ever
+    /// knowing about it, something could put it in a ready-to-yield-items state without waking up
+    /// callers blocked in `next`. The proper solution to this problem is for containers like
+    /// `FuturesUnordered` to stash their own wakers and manage their own `Pending`-vs-`Done`
+    /// state, so that e.g. `for await` loops work naturally, and `NeverDone` isn't needed.
+    ///
+    /// [`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
     pub fn as_pin_mut(self: Pin<&mut Self>) -> Pin<&mut Iter> {
-        self.project().iter
+        let this = self.project();
+        if let Some(waker) = this.last_waker.take() {
+            waker.wake();
+        }
+        this.iter
     }
 }
 
@@ -416,28 +466,18 @@ impl<Iter: AsyncIterator> AsyncIterator for NeverDone<Iter> {
     type Item = Iter::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> PollNext<Self::Item> {
-        match self.project().iter.poll_next(cx) {
+        let this = self.project();
+        *this.last_waker = Some(cx.waker().clone());
+        match this.iter.poll_next(cx) {
             PollNext::Done => PollNext::Pending,
             other => other,
         }
     }
 
     fn poll_progress(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.project().iter.poll_progress(cx)
-    }
-}
-
-impl<Iter> core::ops::Deref for NeverDone<Iter> {
-    type Target = Iter;
-
-    fn deref(&self) -> &Iter {
-        &self.iter
-    }
-}
-
-impl<Iter> core::ops::DerefMut for NeverDone<Iter> {
-    fn deref_mut(&mut self) -> &mut Iter {
-        &mut self.iter
+        let this = self.project();
+        *this.last_waker = Some(cx.waker().clone());
+        this.iter.poll_progress(cx)
     }
 }
 

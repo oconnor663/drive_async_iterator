@@ -4,7 +4,7 @@
 #![feature(yield_expr)]
 #![allow(unused_features)]
 
-use drive_async_iterator::drive;
+use drive_async_iterator::{NeverDone, drive};
 use futures::stream::FuturesUnordered;
 use std::async_iter::{AsyncIterator, PollNext};
 use std::pin::Pin;
@@ -219,5 +219,24 @@ async fn test_reentrant_with_mut_the_other_way() {
         iter.with_pin_mut(|_| {
             iter.with_mut(|_| {});
         });
+    });
+}
+
+#[tokio::test]
+async fn test_never_done_futures_unordered_push_after_done() {
+    async fn forty_two() -> u32 {
+        42
+    }
+    let mut futures = NeverDone::new(FuturesUnordered::new());
+    futures.as_mut().push(forty_two());
+    drive!(futures, {
+        assert_eq!(futures.next().await, Some(42));
+        // At this point the `FuturesUnordered` is empty. `next` would block forever, because the
+        // `FuturesUnordered` is returning `Done`, and `NeverDone` converts that to `Pending`.
+        let one_ms = Duration::from_millis(1);
+        assert!(timeout(one_ms, futures.next()).await.is_err());
+        // Now, add more work and call `next` again. We're testing that this doesn't deadlock.
+        futures.with_mut(|f| f.unwrap().as_mut().push(forty_two()));
+        assert_eq!(futures.next().await, Some(42));
     });
 }

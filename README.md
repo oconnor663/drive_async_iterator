@@ -124,7 +124,7 @@ drive!(futures = NeverDone::new(FuturesUnordered::new()), {
             job = more_work() => {
                 futures.with_mut(|maybe_futures: Option<_>| {
                     let futures = maybe_futures.expect("never dropped");
-                    futures.push(job);
+                    futures.as_mut().push(job);
                 });
             }
         }
@@ -132,5 +132,13 @@ drive!(futures = NeverDone::new(FuturesUnordered::new()), {
 });
 ```
 
+Note that calling `next` on a `NeverDone` async iterator will never return `None`. Instead,
+it'll block potentially forever waiting for the iterator to yield more items. (To make this
+work correctly, `NeverDone` stashes a [`Waker`] and invokes it whenever the inner async
+iterator might be mutated.) That's different from the behavior of `StreamExt::next` today,
+which returns `None` immediately in the empty case. The blocking behavior avoids accidental hot
+loops in some cases, but it can also cause some existing callers to block forever unexpectedly.
+
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
+[`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
