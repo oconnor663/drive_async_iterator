@@ -228,8 +228,8 @@ async fn test_never_done_add_work_after_cancelled_next() {
     async fn forty_two() -> u32 {
         42
     }
-    let mut futures = NeverDone::new(FuturesUnordered::new());
-    futures.as_mut().push(forty_two());
+    let futures = NeverDone::new(FuturesUnordered::new());
+    futures.push(forty_two());
     drive!(futures, {
         assert_eq!(futures.next().await, Some(42));
         // At this point the `FuturesUnordered` is empty. `next` would block forever, because the
@@ -237,7 +237,7 @@ async fn test_never_done_add_work_after_cancelled_next() {
         let one_ms = Duration::from_millis(1);
         assert!(timeout(one_ms, futures.next()).await.is_err());
         // Now, add more work and call `next` again. We're testing that this doesn't deadlock.
-        futures.with_mut(|f| f.unwrap().as_mut().push(forty_two()));
+        futures.with_mut(|f| f.unwrap().push(forty_two()));
         assert_eq!(futures.next().await, Some(42));
     });
 }
@@ -248,7 +248,7 @@ async fn test_bare_add_work_after_cancelled_next() {
     // `FuturesUnordered` off with a `pending` future that will never complete, so that it can
     // never return `Done`. This is an example of why we need to handle mutation-related wakeups in
     // `with_mut`, rather than relying on `NeverDone` to trigger wakeups for us.
-    let futures: FuturesUnordered<BoxFuture<()>> = FuturesUnordered::new();
+    let futures: FuturesUnordered<BoxFuture<u32>> = FuturesUnordered::new();
     futures.push(pending().boxed());
     drive!(futures, {
         // Start a call to `next` but cancel it after a short while. This also absorbs any
@@ -257,9 +257,31 @@ async fn test_bare_add_work_after_cancelled_next() {
         assert!(timeout(Duration::from_millis(10), futures.next()).await.is_err());
         // Now add another future that will be ready immediately.
         futures.with_mut(|maybe_futures| {
-            maybe_futures.unwrap().push(ready(()).boxed());
+            maybe_futures.unwrap().push(ready(42).boxed());
         });
         // Wait on that future. This shouldn't deadlock!
-        assert_eq!(futures.next().await, Some(()));
+        assert_eq!(futures.next().await, Some(42));
+    });
+}
+
+#[tokio::test]
+async fn test_bare_add_work_after_cancelled_next_concurrent() {
+    // This is like the test above except that the new work is added concurrently with the second
+    // call to `next`.
+    let futures: FuturesUnordered<BoxFuture<u32>> = FuturesUnordered::new();
+    futures.push(pending().boxed());
+    drive!(futures, {
+        assert!(timeout(Duration::from_millis(10), futures.next()).await.is_err());
+        futures::join!(
+            async {
+                sleep(Duration::from_millis(10)).await;
+                futures.with_mut(|maybe_futures| {
+                    maybe_futures.unwrap().push(ready(42).boxed());
+                });
+            },
+            async {
+                assert_eq!(futures.next().await, Some(42));
+            }
+        );
     });
 }
