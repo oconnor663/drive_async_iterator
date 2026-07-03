@@ -289,6 +289,11 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
     /// To trigger this panic, you'd have to use something like [`thread::scope`] in an async
     /// context, which would be unusual and potentially an executor-blocking bug in any case.
     ///
+    /// Note also that if this method is cancelled, `drive!` will continue fetching the next item
+    /// from the async iterator in the background. This is necessary to satisfy the `AsyncIterator`
+    /// contract. One you start fetching the next item, the only way to cancel the fetch is to exit
+    /// the entire `drive!` macro.
+    ///
     /// [`AtomicRefCell`]: https://docs.rs/atomic_refcell/latest/atomic_refcell/struct.AtomicRefCell.html
     /// [`Mutex`]: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html
     /// [`task::spawn`]: https://docs.rs/tokio/latest/tokio/task/fn.spawn.html
