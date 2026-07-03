@@ -122,31 +122,30 @@ use atomic_refcell::AtomicRefCell;
 use core::async_iter::{AsyncIterator, PollNext};
 use core::pin::Pin;
 
+/// Take ownership of an `AsyncIterator` and provide a handle with an async [`.next()`] method.
+///
+/// [`.next()`]: DrivenAsyncIterator::next
 #[macro_export]
 macro_rules! drive {
     ($driven_iter:ident, $body:expr $(,)?) => {
         $crate::drive!($driven_iter = $driven_iter, $body)
     };
     ($driven_iter:ident = $iter:expr, $body:expr $(,)?) => {{
-        // SAFETY: This struct must not be moved after this point.
-        let state = unsafe {
-            $crate::_impl::AtomicRefCell::new(
-                $crate::_impl::DriveState::new(
-                    $iter
-                )
-            )
-        };
-        let $driven_iter = $crate::_impl::new_driven_async_iterator(&state);
+        let state_pin = ::core::pin::pin!($crate::_impl::DriveState::new($iter));
+        let state_cell = $crate::_impl::AtomicRefCell::new(state_pin);
+        let $driven_iter = $crate::_impl::new_driven_async_iterator(&state_cell);
         let mut poll_next_future = ::core::pin::pin!(async {
             loop {
-                let mut state = state.borrow_mut();
+                let mut state = state_cell.borrow_mut();
                 // If `next` is cancelled, `item` might not get take immediately. In that case it
                 // might already be `Some`.
-                if state.next_item_wanted && state.item.is_none() {
+                if *state.as_mut().next_item_wanted() && state.as_mut().item().is_none() {
                     // `DriveState` handles fusing and dropping `iterator` internally.
-                    if let ::core::async_iter::PollNext::Item(item) = state.poll_next_once().await {
-                        state.item = Some(item);
-                        state.next_item_wanted = false;
+                    if let ::core::async_iter::PollNext::Item(item) =
+                        state.as_mut().poll_next_once().await
+                    {
+                        *state.as_mut().item() = Some(item);
+                        *state.as_mut().next_item_wanted() = false;
                         // Now we're handing an item off to the body. We need to call
                         // `poll_progress` before this whole macro yields, but we'd rather not call
                         // it now if the body is going to ask for another item immediately.
@@ -158,9 +157,7 @@ macro_rules! drive {
                 $crate::_impl::pending_once().await;
             }
         });
-        let mut body_future = ::core::pin::pin!(async {
-            $body
-        });
+        let mut body_future = ::core::pin::pin!(async { $body });
         loop {
             // Polling the poll-next-future is a no-op once the iterator is done.
             _ = $crate::_impl::poll_once(poll_next_future.as_mut()).await;
@@ -168,12 +165,12 @@ macro_rules! drive {
             if let ::core::task::Poll::Ready(output) = body_poll {
                 break output;
             }
-            let mut state = state.borrow_mut();
-            if !state.next_item_wanted {
+            let mut state = state_cell.borrow_mut();
+            if !*state.as_mut().next_item_wanted() {
                 // The body is awaiting something other than `next`, possibly after some calls
                 // to `next` have yielded items. This is where we call `poll_progress`, so that
                 // in general we only call it once after a chain of ready items.
-                _ = state.poll_progress_once().await;
+                _ = state.as_mut().poll_progress_once().await;
             }
             // Either the iterator side is awaiting the next item, or the body side is awaiting
             // something else, or both. They will wake us up.
@@ -185,28 +182,49 @@ macro_rules! drive {
     }};
 }
 
-pub struct DrivenAsyncIterator<'a, Iter: AsyncIterator> {
-    state: &'a AtomicRefCell<_impl::DriveState<Iter>>,
+/// The `AsyncIterator` wrapper type that `drive!` provides to its body
+pub struct DrivenAsyncIterator<'a, 'b, Iter: AsyncIterator> {
+    state: &'a AtomicRefCell<Pin<&'b mut _impl::DriveState<Iter>>>,
 }
 
-impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, Iter> {
+impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
+    /// Get the next item from the async iterator.
+    ///
+    /// Note that this method takes `&self`, and multiple futures are allowed to call it
+    /// concurrently. However, if you manage to call `next` from multiple _threads_, it's likely to
+    /// panic.
+    ///
+    /// Implementation details: `DrivenAsyncIterator` uses an [`AtomicRefCell`] internally, rather
+    /// than a [`Mutex`]. This makes it more efficient and also `no_std`-compatible. The downside
+    /// is panics when it's accessed from parallel threads, but this should be extremely unlikely
+    /// in practice. `DrivenAsyncIterator` has a local lifetime bound, so it can't be given to
+    /// [`task::spawn`] or [`thread::spawn`]. Scoped tasks also [don't currently exist][trilemma].
+    /// To trigger this panic, you'd have to use something like [`thread::scope`] in an async
+    /// context, which would be unusual and potentially an executor-blocking bug in any case.
+    ///
+    /// [`AtomicRefCell`]: https://docs.rs/atomic_refcell/latest/atomic_refcell/struct.AtomicRefCell.html
+    /// [`Mutex`]: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html
+    /// [`task::spawn`]: https://docs.rs/tokio/latest/tokio/task/fn.spawn.html
+    /// [`thread::spawn`]: https://doc.rust-lang.org/std/thread/fn.spawn.html
+    /// [`thread::scope`]: https://doc.rust-lang.org/std/thread/fn.scope.html
+    /// [trilemma]: https://without.boats/blog/the-scoped-task-trilemma/
     pub async fn next(&self) -> Option<Iter::Item> {
         loop {
             let mut state = self.state.borrow_mut();
-            if let Some(item) = state.item.take() {
+            if let Some(item) = state.as_mut().item().take() {
                 return Some(item);
             }
-            if state.iterator_is_done() {
+            if state.as_mut().iterator().is_none() {
                 return None;
             }
             // NOTE: `next_item_wanted` might already be true if there are concurrent calls to
             // `next, or if a previous call was cancelled. That's fine. If a concurrent call beats
             // us to the item, it'll clear `next_item_wanted`, and then we'll restore it.
-            if !state.next_item_wanted {
+            if !*state.as_mut().next_item_wanted() {
                 // There's no buffered item, and the iterator isn't already in a `poll_next` loop.
                 // Try calling `poll_next` ourselves. This is a fake await (just for `Context`),
                 // which is guaranteed to be ready immediately.
-                match state.poll_next_once().await {
+                match state.as_mut().poll_next_once().await {
                     // If we get an item, we can just return it. That'll leave `next_item_wanted`
                     // false, and the outer loop will do a `poll_progress` for us.
                     PollNext::Item(item) => return Some(item),
@@ -220,7 +238,7 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, Iter> {
                 // cancelled. (If this function *owned* the iterator, then cancelling it would drop
                 // the iterator, and the contract would be satisfied.) We need to set
                 // `next_item_wanted` and trust the poll-next-future to take care of this for us.
-                state.next_item_wanted = true;
+                *state.as_mut().next_item_wanted() = true;
             }
             // Yield without arranging our own wakeup, trusting the poll-next-future to make
             // progress for us. Don't keep `state` borrowed across this.
@@ -234,7 +252,7 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, Iter> {
         F: FnOnce(Option<Pin<&mut Iter>>) -> Ret,
     {
         let mut state = self.state.borrow_mut();
-        f(state.iterator_pinned())
+        f(state.as_mut().iterator().as_pin_mut())
     }
 
     pub fn with_mut<F, Ret>(&self, f: F) -> Ret
@@ -243,7 +261,7 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, Iter> {
         Iter: Unpin,
     {
         let mut state = self.state.borrow_mut();
-        f(state.iterator_pinned().map(Pin::get_mut))
+        f(state.as_mut().iterator().get_mut().as_mut())
     }
 }
 
@@ -257,26 +275,23 @@ pub mod _impl {
     // The macro needs `AtomicRefCell` internally.
     pub use atomic_refcell::AtomicRefCell;
 
-    pub fn new_driven_async_iterator<'a, Iter: AsyncIterator>(
-        state: &'a AtomicRefCell<DriveState<Iter>>,
-    ) -> super::DrivenAsyncIterator<'a, Iter> {
+    pub fn new_driven_async_iterator<'a, 'b, Iter: AsyncIterator>(
+        state: &'a AtomicRefCell<Pin<&'b mut DriveState<Iter>>>,
+    ) -> super::DrivenAsyncIterator<'a, 'b, Iter> {
         super::DrivenAsyncIterator { state }
     }
 
-    pub struct DriveState<Iter: AsyncIterator> {
-        iterator: Option<Iter>, // unsafe pinned
-        pub item: Option<Iter::Item>,
-        pub next_item_wanted: bool,
+    pin_project_lite::pin_project! {
+        pub struct DriveState<Iter: AsyncIterator> {
+            #[pin]
+            iterator: Option<Iter>,
+            item: Option<Iter::Item>,
+            next_item_wanted: bool,
+        }
     }
 
     impl<Iter: AsyncIterator> DriveState<Iter> {
-        // This struct pins `iterator`, but taking a dependency on e.g. `pin_project_lite` would
-        // add build time and make this complicated macro even more complicated. We obviously never
-        // move this after constructing it, and we never expose our instance to the caller either
-        // (it gets a hygienic name), so we could almost get away with leaving this API technically
-        // unsound. But for macro reasons it has to be public, so we make this constructor unsafe
-        // to establish soundness with only a small change to the macroexpanded code.
-        pub unsafe fn new(iter: Iter) -> Self {
+        pub fn new(iter: Iter) -> Self {
             Self {
                 iterator: Some(iter),
                 item: None,
@@ -284,22 +299,21 @@ pub mod _impl {
             }
         }
 
-        pub(crate) fn iterator_pinned(&mut self) -> Option<Pin<&mut Iter>> {
-            if let Some(iter) = &mut self.iterator {
-                // SAFETY: `new` is unsafe, and this field is private.
-                Some(unsafe { Pin::new_unchecked(iter) })
-            } else {
-                None
-            }
+        pub fn iterator(self: Pin<&mut Self>) -> Pin<&mut Option<Iter>> {
+            self.project().iterator
         }
 
-        pub fn iterator_is_done(&self) -> bool {
-            self.iterator.is_none()
+        pub fn item(self: Pin<&mut Self>) -> &mut Option<Iter::Item> {
+            self.project().item
+        }
+
+        pub fn next_item_wanted(self: Pin<&mut Self>) -> &mut bool {
+            self.project().next_item_wanted
         }
 
         /// This drops `iterator` the first time it returns `Done`, and it keeps returning `Done`
         /// after that. (In other words, the iterator is effectively "fused".)
-        pub async fn poll_next_once(&mut self) -> PollNext<Iter::Item> {
+        pub async fn poll_next_once(mut self: Pin<&mut Self>) -> PollNext<Iter::Item> {
             pub struct PollNextOnce<'a, Iter>(Pin<&'a mut Iter>);
             impl<Iter: AsyncIterator> Future for PollNextOnce<'_, Iter> {
                 type Output = PollNext<Iter::Item>;
@@ -307,10 +321,10 @@ pub mod _impl {
                     Poll::Ready(self.0.as_mut().poll_next(cx))
                 }
             }
-            if let Some(iter) = self.iterator_pinned() {
+            if let Some(iter) = self.as_mut().iterator().as_pin_mut() {
                 let poll_next = PollNextOnce(iter).await;
                 if let PollNext::Done = poll_next {
-                    self.iterator = None;
+                    self.as_mut().iterator().set(None);
                 }
                 poll_next
             } else {
@@ -319,7 +333,7 @@ pub mod _impl {
         }
 
         /// If `iterator` has returned `Done` and been dropped, then this returns `Ready(())`.
-        pub async fn poll_progress_once(&mut self) -> Poll<()> {
+        pub async fn poll_progress_once(self: Pin<&mut Self>) -> Poll<()> {
             pub struct PollProgressOnce<'a, Iter>(Pin<&'a mut Iter>);
             impl<Iter: AsyncIterator> Future for PollProgressOnce<'_, Iter> {
                 type Output = Poll<()>;
@@ -327,7 +341,7 @@ pub mod _impl {
                     Poll::Ready(self.0.as_mut().poll_progress(cx))
                 }
             }
-            if let Some(iter) = self.iterator_pinned() {
+            if let Some(iter) = self.iterator().as_pin_mut() {
                 PollProgressOnce(iter).await
             } else {
                 Poll::Ready(())

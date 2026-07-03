@@ -153,20 +153,50 @@ async fn test_with_mut() {
     use futures::FutureExt;
     drive!(iter = FuturesUnordered::new(), {
         iter.with_mut(|maybe_iter| {
-            maybe_iter.unwrap().push(async {
-                sleep(Duration::from_millis(10)).await;
-                42
-            }.boxed());
+            maybe_iter.unwrap().push(
+                async {
+                    sleep(Duration::from_millis(10)).await;
+                    42
+                }
+                .boxed(),
+            );
         });
         assert_eq!(iter.next().await, Some(42));
         // Test `with_pin_mut` also, which doesn't require `Unpin`.
         iter.with_pin_mut(|maybe_iter| {
-            maybe_iter.unwrap().push(async {
-                sleep(Duration::from_millis(10)).await;
-                99
-            }.boxed());
+            maybe_iter.unwrap().push(
+                async {
+                    sleep(Duration::from_millis(10)).await;
+                    99
+                }
+                .boxed(),
+            );
         });
         assert_eq!(iter.next().await, Some(99));
         assert_eq!(iter.next().await, None);
+    });
+}
+
+#[tokio::test]
+async fn test_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let future = async {
+        drive!(iter = futures::stream::iter([1, 2, 3]), {
+            while let Some(_) = iter.next().await {}
+        });
+    };
+    assert_send_sync(&future);
+}
+
+#[tokio::test]
+async fn test_with_mut_after_drop() {
+    drive!(iter = futures::stream::iter([()]), {
+        iter.with_mut(|maybe| assert!(maybe.is_some()));
+        assert!(iter.next().await.is_some());
+        iter.with_mut(|maybe| assert!(maybe.is_some()));
+        assert!(iter.next().await.is_none());
+        iter.with_mut(|maybe| assert!(maybe.is_none()));
+        assert!(iter.next().await.is_none());
+        iter.with_mut(|maybe| assert!(maybe.is_none()));
     });
 }

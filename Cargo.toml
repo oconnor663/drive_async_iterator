@@ -9,6 +9,7 @@ edition = "2024"
 
 [dependencies]
 atomic_refcell = "0.1.14"
+pin-project-lite = "0.2.17"
 
 [dev-dependencies]
 futures = { version = "0.3" }
