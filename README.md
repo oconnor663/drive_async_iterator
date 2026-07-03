@@ -99,7 +99,6 @@ loop {
         }
         job = more_work() => futures.push(job),
     }
-    # break // don't run this docs example forever
 }
 ```
 
@@ -110,8 +109,8 @@ That example isn't going to work with `for await`, for two reasons:
    await` and also the `drive!` macro drop it immediately. We need it to return `Pending`
    instead.
 
-For the first problem, the handle provided by `drive!` supports the [`with_pin_mut`] and (for
-`Unpin` types) [`with_mut`] methods. For the second problem, this crate provides a
+For the first problem, the handle provided by `drive!` supports the `with_pin_mut` and (for
+`Unpin` types) `with_mut` methods. For the second problem, this crate provides a
 [`NeverDone`] async iterator adapter. Putting those two things together, we can implement the
 example above while still calling `poll_progress` correctly under the hood:
 
@@ -129,12 +128,9 @@ drive!(futures = NeverDone::new(FuturesUnordered::new()), {
                 });
             }
         }
-        # break // don't run this docs example forever
     }
 });
 ```
 
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
-[`with_pin_mut`]: DrivenAsyncIterator::with_pin_mut
-[`with_mut`]: DrivenAsyncIterator::with_mut
