@@ -5,6 +5,7 @@
 #![allow(unused_features)]
 
 use drive_async_iterator::{NeverDone, drive};
+use futures::future::{BoxFuture, FutureExt, pending, ready};
 use futures::stream::FuturesUnordered;
 use std::async_iter::{AsyncIterator, PollNext};
 use std::pin::Pin;
@@ -223,7 +224,7 @@ async fn test_reentrant_with_mut_the_other_way() {
 }
 
 #[tokio::test]
-async fn test_never_done_futures_unordered_push_after_done() {
+async fn test_never_done_add_work_after_cancelled_next() {
     async fn forty_two() -> u32 {
         42
     }
@@ -238,5 +239,27 @@ async fn test_never_done_futures_unordered_push_after_done() {
         // Now, add more work and call `next` again. We're testing that this doesn't deadlock.
         futures.with_mut(|f| f.unwrap().as_mut().push(forty_two()));
         assert_eq!(futures.next().await, Some(42));
+    });
+}
+
+#[tokio::test]
+async fn test_bare_add_work_after_cancelled_next() {
+    // This is like the test above, except it doesn't use `NeverDone`. Instead, we start the
+    // `FuturesUnordered` off with a `pending` future that will never complete, so that it can
+    // never return `Done`. This is an example of why we need to handle mutation-related wakeups in
+    // `with_mut`, rather than relying on `NeverDone` to trigger wakeups for us.
+    let futures: FuturesUnordered<BoxFuture<()>> = FuturesUnordered::new();
+    futures.push(pending().boxed());
+    drive!(futures, {
+        // Start a call to `next` but cancel it after a short while. This also absorbs any
+        // immediate wakeups that `FuturesUnordered` might trigger. See:
+        // https://github.com/rust-lang/futures-rs/blob/f68806c1205a6495d5c381bc9180d162e791b010/futures-util/src/stream/futures_unordered/mod.rs#L545
+        assert!(timeout(Duration::from_millis(10), futures.next()).await.is_err());
+        // Now add another future that will be ready immediately.
+        futures.with_mut(|maybe_futures| {
+            maybe_futures.unwrap().push(ready(()).boxed());
+        });
+        // Wait on that future. This shouldn't deadlock!
+        assert_eq!(futures.next().await, Some(()));
     });
 }
