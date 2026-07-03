@@ -139,4 +139,24 @@ some existing callers to block forever unexpectedly.
 
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
-[`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
+
+## Short-circuiting returns
+
+For convenience, a `return` or a failing `?` in the `drive!` body short-circuits the _calling
+function_. This is different from async blocks, where a `return` gives the value of the block.
+This makes the `drive!` body work similarly to the body of a `for await` loop. For example:
+
+```rust
+async fn foo() -> std::io::Result<()> {
+    let paths = ["foo.txt", "bar.txt"];
+    let value = drive!(iter = async_iter::from_iter(paths), {
+        while let Some(path) = iter.next().await {
+            // An error here will short-circuit `foo`. `value` is not a `Result`.
+            std::fs::File::open(path)?;
+        }
+        42
+    });
+    assert_eq!(value, 42);
+    Ok(())
+}
+```

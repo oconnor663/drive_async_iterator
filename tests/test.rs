@@ -254,7 +254,11 @@ async fn test_bare_add_work_after_cancelled_next() {
         // Start a call to `next` but cancel it after a short while. This also absorbs any
         // immediate wakeups that `FuturesUnordered` might trigger. See:
         // https://github.com/rust-lang/futures-rs/blob/f68806c1205a6495d5c381bc9180d162e791b010/futures-util/src/stream/futures_unordered/mod.rs#L545
-        assert!(timeout(Duration::from_millis(10), futures.next()).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(10), futures.next())
+                .await
+                .is_err()
+        );
         // Now add another future that will be ready immediately.
         futures.with_mut(|maybe_futures| {
             maybe_futures.unwrap().push(ready(42).boxed());
@@ -271,7 +275,11 @@ async fn test_bare_add_work_after_cancelled_next_concurrent() {
     let futures: FuturesUnordered<BoxFuture<u32>> = FuturesUnordered::new();
     futures.push(pending().boxed());
     drive!(futures, {
-        assert!(timeout(Duration::from_millis(10), futures.next()).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(10), futures.next())
+                .await
+                .is_err()
+        );
         futures::join!(
             async {
                 sleep(Duration::from_millis(10)).await;
@@ -284,4 +292,34 @@ async fn test_bare_add_work_after_cancelled_next_concurrent() {
             }
         );
     });
+}
+
+#[tokio::test]
+async fn test_value() {
+    async fn foo() -> u32 {
+        drive!(iter = futures::stream::iter([()]), { 42 })
+    }
+    assert_eq!(foo().await, 42);
+}
+
+#[tokio::test]
+async fn test_return() {
+    async fn foo() -> u32 {
+        drive!(iter = futures::stream::iter([()]), {
+            return 42;
+        });
+        unreachable!();
+    }
+    assert_eq!(foo().await, 42);
+}
+
+#[tokio::test]
+async fn test_error() {
+    async fn foo() -> std::io::Result<()> {
+        drive!(iter = futures::stream::iter([()]), {
+            std::fs::File::open("/nonexistent/file.txt")?;
+        });
+        Ok(())
+    }
+    assert!(foo().await.is_err());
 }

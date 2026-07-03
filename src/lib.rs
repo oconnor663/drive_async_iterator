@@ -198,7 +198,31 @@
 //! [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 //! [`with_pin_mut`]: DrivenAsyncIterator::with_pin_mut
 //! [`with_mut`]: DrivenAsyncIterator::with_mut
-//! [`Waker`]: https://doc.rust-lang.org/core/task/struct.Waker.html
+//!
+//! # Short-circuiting returns
+//!
+//! For convenience, a `return` or a failing `?` in the `drive!` body short-circuits the _calling
+//! function_. This is different from async blocks, where a `return` gives the value of the block.
+//! This makes the `drive!` body work similarly to the body of a `for await` loop. For example:
+//!
+//! ```
+//! # #![feature(async_iterator)]
+//! # #![feature(async_iter_from_iter)]
+//! # use drive_async_iterator::drive;
+//! # use std::async_iter;
+//! async fn foo() -> std::io::Result<()> {
+//!     let paths = ["foo.txt", "bar.txt"];
+//!     let value = drive!(iter = async_iter::from_iter(paths), {
+//!         while let Some(path) = iter.next().await {
+//!             // An error here will short-circuit `foo`. `value` is not a `Result`.
+//!             std::fs::File::open(path)?;
+//!         }
+//!         42
+//!     });
+//!     assert_eq!(value, 42);
+//!     Ok(())
+//! }
+//! ```
 
 #![no_std]
 #![feature(async_iterator)]
@@ -243,15 +267,29 @@ macro_rules! drive {
                 $crate::_impl::pending_once().await;
             }
         });
-        let mut body_future = ::core::pin::pin!(async { $body });
+        // The `Output` of the body future is only used for short-circuiting returns. If control
+        // reaches the end, the value goes in `DriveState::body_value`.
+        let mut body_future = ::core::pin::pin!(async {
+            let value = $body;
+            #[allow(unreachable_code)]
+            {
+                *state_cell.borrow_mut().as_mut().body_value() = Some(value);
+                ::core::future::pending().await
+            }
+        });
         loop {
             // Polling the poll-next-future is a no-op once the iterator is done.
             _ = $crate::_impl::poll_once(poll_next_future.as_mut()).await;
             let body_poll = $crate::_impl::poll_once(body_future.as_mut()).await;
             if let ::core::task::Poll::Ready(output) = body_poll {
-                break output;
+                // This is a short-circuiting return from the body.
+                return output;
             }
             let mut state = state_cell.borrow_mut();
+            if let Some(value) = state.as_mut().body_value().take() {
+                // This is control reaching the end of the body.
+                break value;
+            }
             if *state.as_mut().mutated_this_iteration() {
                 *state.as_mut().mutated_this_iteration() = false;
                 // If `with_mut` or `with_pin_mut` has been called and something is (maybe
@@ -283,11 +321,11 @@ macro_rules! drive {
 }
 
 /// The `AsyncIterator` wrapper type that `drive!` provides to its body
-pub struct DrivenAsyncIterator<'a, 'b, Iter: AsyncIterator> {
-    state: &'a AtomicRefCell<Pin<&'b mut _impl::DriveState<Iter>>>,
+pub struct DrivenAsyncIterator<'a, 'b, Iter: AsyncIterator, T> {
+    state: &'a AtomicRefCell<Pin<&'b mut _impl::DriveState<Iter, T>>>,
 }
 
-impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
+impl<Iter: AsyncIterator, T> DrivenAsyncIterator<'_, '_, Iter, T> {
     /// Get the next item from the async iterator.
     ///
     /// Note that this method takes `&self`, and multiple futures are allowed to call it
@@ -383,7 +421,7 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
     }
 }
 
-impl<Iter: AsyncIterator> core::fmt::Debug for DrivenAsyncIterator<'_, '_, Iter> {
+impl<Iter: AsyncIterator, T> core::fmt::Debug for DrivenAsyncIterator<'_, '_, Iter, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DrivenAsyncIterator").finish()
     }
@@ -456,14 +494,14 @@ impl<Iter> core::ops::DerefMut for NeverDone<Iter> {
 impl<Iter: AsyncIterator> AsyncIterator for NeverDone<Iter> {
     type Item = Iter::Item;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> PollNext<Self::Item> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
         match self.project().iter.poll_next(cx) {
             PollNext::Done => PollNext::Pending,
             other => other,
         }
     }
 
-    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         self.project().iter.poll_progress(cx)
     }
 }
@@ -478,29 +516,33 @@ pub mod _impl {
     // The macro needs `AtomicRefCell` internally.
     pub use atomic_refcell::AtomicRefCell;
 
-    pub fn new_driven_async_iterator<'a, 'b, Iter: AsyncIterator>(
-        state: &'a AtomicRefCell<Pin<&'b mut DriveState<Iter>>>,
-    ) -> super::DrivenAsyncIterator<'a, 'b, Iter> {
+    pub fn new_driven_async_iterator<'a, 'b, Iter: AsyncIterator, T>(
+        state: &'a AtomicRefCell<Pin<&'b mut DriveState<Iter, T>>>,
+    ) -> super::DrivenAsyncIterator<'a, 'b, Iter, T> {
         super::DrivenAsyncIterator { state }
     }
 
     pin_project_lite::pin_project! {
-        pub struct DriveState<Iter: AsyncIterator> {
+        pub struct DriveState<Iter: AsyncIterator, T> {
             #[pin]
             iterator: Option<Iter>,
             item: Option<Iter::Item>,
             next_item_wanted: bool,
             mutated_this_iteration: bool,
+            // The output of the body future is used for short-circuiting returns. If control
+            // reaches the end of the body, the final value goes here.
+            body_value: Option<T>,
         }
     }
 
-    impl<Iter: AsyncIterator> DriveState<Iter> {
+    impl<Iter: AsyncIterator, T> DriveState<Iter, T> {
         pub fn new(iter: Iter) -> Self {
             Self {
                 iterator: Some(iter),
                 item: None,
                 next_item_wanted: false,
                 mutated_this_iteration: false,
+                body_value: None,
             }
         }
 
@@ -520,13 +562,17 @@ pub mod _impl {
             self.project().mutated_this_iteration
         }
 
+        pub fn body_value(self: Pin<&mut Self>) -> &mut Option<T> {
+            self.project().body_value
+        }
+
         /// This drops `iterator` the first time it returns `Done`, and it keeps returning `Done`
         /// after that. (In other words, the iterator is effectively "fused".)
         pub async fn poll_next_once(mut self: Pin<&mut Self>) -> PollNext<Iter::Item> {
             pub struct PollNextOnce<'a, Iter>(Pin<&'a mut Iter>);
             impl<Iter: AsyncIterator> Future for PollNextOnce<'_, Iter> {
                 type Output = PollNext<Iter::Item>;
-                fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
                     Poll::Ready(self.0.as_mut().poll_next(cx))
                 }
             }
@@ -546,7 +592,7 @@ pub mod _impl {
             pub struct PollProgressOnce<'a, Iter>(Pin<&'a mut Iter>);
             impl<Iter: AsyncIterator> Future for PollProgressOnce<'_, Iter> {
                 type Output = Poll<()>;
-                fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
                     Poll::Ready(self.0.as_mut().poll_progress(cx))
                 }
             }
@@ -571,7 +617,7 @@ pub mod _impl {
         type Output = ();
 
         #[inline]
-        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context) -> Poll<()> {
             if self.yielded {
                 Poll::Ready(())
             } else {
@@ -592,7 +638,7 @@ pub mod _impl {
         type Output = Poll<Fut::Output>;
 
         #[inline]
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
             Poll::Ready(self.0.as_mut().poll(cx))
         }
     }
