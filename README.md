@@ -49,7 +49,6 @@ Consider this example ([playground link][playground_deadlock]):
 [playground_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=88087e5b73a1697d62e743966dfe3f10>
 
 ```rust
-#
 // This function acquires a static `Mutex` and does a brief sleep,
 // simulating some sort of IO with a shared resource.
 async fn foo() {
@@ -67,8 +66,8 @@ while let Some(_) = futures.next().await {
 ```
 
 That example deadlocks because one of the `foo` futures in the [`FuturesUnordered`] is holding
-the `LOCK` yet not making progress. But with `drive!`, the same loop runs smoothly, because
-`FuturesUnordered` polls its contents concurrently with the loop body:
+the `LOCK`, but it's not making progress. Using `drive!` the same loop runs smoothly, because
+`FuturesUnordered` can poll its contents concurrently with the loop body:
 
 ```rust
 let mut futures = FuturesUnordered::new();
@@ -111,7 +110,7 @@ That example isn't going to work with `for await`, for two reasons:
 
 For the first problem, the handle provided by `drive!` supports the `with_pin_mut` and (for
 `Unpin` types) `with_mut` methods. For the second problem, this crate provides a
-[`NeverDone`] async iterator adapter. Putting those two things together, we can implement the
+`NeverDone` async iterator adapter. Putting those two things together, we can implement the
 example above while still calling `poll_progress` correctly under the hood:
 
 ```rust

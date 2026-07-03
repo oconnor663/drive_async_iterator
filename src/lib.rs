@@ -64,7 +64,6 @@
 //! # use futures::stream::FuturesUnordered;
 //! # use tokio::sync::Mutex;
 //! # use tokio::time::{Duration, sleep};
-//! #
 //! // This function acquires a static `Mutex` and does a brief sleep,
 //! // simulating some sort of IO with a shared resource.
 //! async fn foo() {
@@ -85,8 +84,8 @@
 //! ```
 //!
 //! That example deadlocks because one of the `foo` futures in the [`FuturesUnordered`] is holding
-//! the `LOCK` yet not making progress. But with `drive!`, the same loop runs smoothly, because
-//! `FuturesUnordered` polls its contents concurrently with the loop body:
+//! the `LOCK`, but it's not making progress. Using `drive!` the same loop runs smoothly, because
+//! `FuturesUnordered` can poll its contents concurrently with the loop body:
 //!
 //! ```
 //! # #![feature(async_iterator)]
@@ -424,7 +423,7 @@ impl<Iter> NeverDone<Iter> {
     /// invokes that `Waker`. This ensures that callers who are blocked in `next` wake up and
     /// re-poll, in case this mutation has unblocked them.
     ///
-    /// Note that this is a best-effort mechanism, but it's not perfect. If the inner iterator
+    /// Note that this is a best-effort mechanism, and it's not perfect. If the inner iterator
     /// holds something like an `Arc<Mutex<_>>`, which might be mutated without this wrapper ever
     /// knowing about it, something could put it in a ready-to-yield-items state without waking up
     /// callers blocked in `next`. The proper solution to this problem is for containers like
@@ -445,7 +444,7 @@ impl<Iter> NeverDone<Iter> {
     /// invokes that `Waker`. This ensures that callers who are blocked in `next` wake up and
     /// re-poll, in case this mutation has unblocked them.
     ///
-    /// Note that this is a best-effort mechanism, but it's not perfect. If the inner iterator
+    /// Note that this is a best-effort mechanism, and it's not perfect. If the inner iterator
     /// holds something like an `Arc<Mutex<_>>`, which might be mutated without this wrapper ever
     /// knowing about it, something could put it in a ready-to-yield-items state without waking up
     /// callers blocked in `next`. The proper solution to this problem is for containers like
