@@ -1,5 +1,9 @@
 //! # `drive_async_iterator`
 //!
+//! > **HEADS UP:** This experimental macro currently requires a [fork of
+//! > rustc](https://github.com/oconnor663/rust/pull/2) to build, because it depends on the
+//! > proposed `AsyncIterator::poll_progress` method.
+//!
 //! With the introduction of `AsyncIterator::poll_progress`, the `.next()` method on
 //! `Stream`/`StreamExt` is probably not going to work, because there's no way for it to fulfill
 //! the `poll_progress` contract. The most common use case of `.next()` can be replaced with a `for
@@ -46,12 +50,14 @@
 //! There are two ways to invoke the macro. As above, there's `drive!(<name> = <iter>, <body>)`.
 //! And for cases where you would write `<name> = <name>`, there's the shorthand `drive!(<name>, <body>)`.
 //!
+//! ## Fixing deadlocks
+//!
 //! Besides helping with migration, this macro solves a [class of
 //! deadlocks](https://jacko.io/snooze.html) that present-day `.next()` loops are vulnerable to. Or
 //! rather, `poll_progress` solves them, and this macro wires `.next()` into `poll_progress`.
-//! Consider this example ([playground link]):
+//! Consider this example ([playground link][playground_deadlock]):
 //!
-//! [playground link]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=88087e5b73a1697d62e743966dfe3f10>
+//! [playground_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=88087e5b73a1697d62e743966dfe3f10>
 //!
 //! ```no_run
 //! # use futures::StreamExt;
@@ -78,9 +84,9 @@
 //! # }
 //! ```
 //!
-//! That example deadlocks because one of the `foo` futures in the `FuturesUnordered` is holding
-//! the `LOCK`, but it's not making progress. But with `drive!`, the same loop runs smoothly,
-//! because `FuturesUnordered` drives its contents concurrently with the loop:
+//! That example deadlocks because one of the `foo` futures in the [`FuturesUnordered`] is holding
+//! the `LOCK` yet not making progress. But with `drive!`, the same loop runs smoothly, because
+//! `FuturesUnordered` polls its contents concurrently with the loop body:
 //!
 //! ```
 //! # #![feature(async_iterator)]
@@ -89,7 +95,6 @@
 //! # use futures::stream::FuturesUnordered;
 //! # use tokio::sync::Mutex;
 //! # use tokio::time::{Duration, sleep};
-//! #
 //! # // This function acquires a static `Mutex` and does a brief sleep,
 //! # // simulating some sort of IO with a shared resource.
 //! # async fn foo() {
@@ -97,7 +102,6 @@
 //! #     let _guard = LOCK.lock().await;
 //! #     sleep(Duration::from_millis(10)).await;
 //! # }
-//! #
 //! # #[tokio::main]
 //! # async fn main() {
 //! let mut futures = FuturesUnordered::new();
@@ -111,9 +115,84 @@
 //! # }
 //! ```
 //!
-//! This experimental macro currently requires a [fork of
-//! rustc](https://github.com/oconnor663/rust/pull/2) to build, because it depends on the proposed
-//! `AsyncIterator::poll_progress` method.
+//! ## More complicated cases
+//!
+//! The example above could work with a standard `for await` loop, so it doesn't necessarily need
+//! the `drive!` macro. However, one of the powerful features of [`FuturesUnordered`] (and also for
+//! example [`StreamMap`]) is that you can add more work to it while it's running ([playground
+//! link][playground_select]):
+//!
+//! [playground_select]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=46fd466a8a7893a54cf576df84334ef6
+//!
+//! ```
+//! # use futures::StreamExt;
+//! # use futures::stream::FuturesUnordered;
+//! # use tokio::select;
+//! # async fn work() {}
+//! # async fn more_work() -> impl Future<Output = ()> {
+//! #     work()
+//! # }
+//! # #[tokio::main]
+//! # async fn main() {
+//! let mut futures = FuturesUnordered::new();
+//! loop {
+//!     select! {
+//!         Some(_) = futures.next() => {
+//!             // Do something with the result...
+//!         }
+//!         job = more_work() => futures.push(job),
+//!     }
+//!     # break // don't run this docs example forever
+//! }
+//! # }
+//! ```
+//!
+//! That example isn't going to work with `for await`, for two reasons:
+//!
+//! 1. We need access to `futures` in the loop body, but `for await` takes ownership of it.
+//! 2. When `FuturesUnordered` is empty, its `poll_next` method returns `Done`. But that makes `for
+//!    await` and also the `drive!` macro drop it immediately. We need it to return `Pending`
+//!    instead.
+//!
+//! For the first problem, the handle provided by `drive!` supports the [`with_pin_mut`] and (for
+//! `Unpin` types) [`with_mut`] methods. For the second problem, this crate provides a
+//! [`NeverDone`] async iterator adapter. Putting those two things together, we can implement the
+//! example above while still calling `poll_progress` correctly under the hood:
+//!
+//! ```
+//! # #![feature(async_iterator)]
+//! # use drive_async_iterator::{NeverDone, drive};
+//! # use futures::stream::FuturesUnordered;
+//! # use tokio::select;
+//! # async fn work() {}
+//! # async fn more_work() -> impl Future<Output = ()> {
+//! #     work()
+//! # }
+//! # #[tokio::main]
+//! # async fn main() {
+//! drive!(futures = NeverDone::new(FuturesUnordered::new()), {
+//!     loop {
+//!         select! {
+//!             Some(_) = futures.next() => {
+//!                 // Do something with the result...
+//!             }
+//!             job = more_work() => {
+//!                 futures.with_mut(|maybe_futures: Option<_>| {
+//!                     let futures = maybe_futures.expect("never dropped");
+//!                     futures.push(job);
+//!                 });
+//!             }
+//!         }
+//!         # break // don't run this docs example forever
+//!     }
+//! });
+//! # }
+//! ```
+//!
+//! [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
+//! [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
+//! [`with_pin_mut`]: DrivenAsyncIterator::with_pin_mut
+//! [`with_mut`]: DrivenAsyncIterator::with_mut
 
 #![no_std]
 #![feature(async_iterator)]
@@ -121,6 +200,7 @@
 use atomic_refcell::AtomicRefCell;
 use core::async_iter::{AsyncIterator, PollNext};
 use core::pin::Pin;
+use core::task::{Context, Poll};
 
 /// Take ownership of an `AsyncIterator` and provide a handle with an async [`.next()`] method.
 ///
@@ -273,6 +353,91 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
     {
         let mut state = self.state.borrow_mut();
         f(state.as_mut().iterator().get_mut().as_mut())
+    }
+}
+
+impl<Iter: AsyncIterator> core::fmt::Debug for DrivenAsyncIterator<'_, '_, Iter> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DrivenAsyncIterator").finish()
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// An `AsyncIterator` wrapper that never returns `Done`
+    ///
+    /// An `AsyncIterator` caller is generally supposed to drop the iterator promptly after
+    /// `poll_next` returns `Done`. `for await` loops do this, and the `drive!` macro also does
+    /// this, without waiting for its body to finish. But some async iterators, for example
+    /// [`FuturesUnordered`] and [`StreamMap`], work differently. These allow their caller to add
+    /// work to them at any time. If they run out of work, their `poll_next` methods return `Done`,
+    /// but they can return `Some` again later if more work is added again. This doesn't play well
+    /// with `for await` or `drive!`, because they'll drop the iterator the first time they see
+    /// `Done`. (`for await` also makes it hard to add work during the loop, because it has no
+    /// equivalent of [`with_pin_mut`] or [`with_mut`]).
+    ///
+    /// `NeverDone` is a workaround for this problem. It's a thin `AsyncIterator` wrapper that
+    /// never returns `Done`. When the inner iterator would return `Done`, `NeverDone` returns
+    /// `Pending` instead. This means that the inner iterator's `poll_next` method might get called
+    /// again after returning `Done`, which isn't generally allowed, and which will cause some
+    /// iterators to panic. It's the caller's responsibility to only use `NeverDone` with async
+    /// iterators that allow this.
+    ///
+    /// See the example in the [module level docs](crate#more-complicated-cases).
+    ///
+    /// [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
+    /// [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
+    /// [`with_pin_mut`]: DrivenAsyncIterator::with_pin_mut
+    /// [`with_mut`]: DrivenAsyncIterator::with_mut
+    #[derive(Debug)]
+    pub struct NeverDone<Iter> {
+        #[pin]
+        iter: Iter,
+    }
+}
+
+impl<Iter> NeverDone<Iter> {
+    /// Wrap an `AsyncIterator` with `NeverDone`.
+    pub fn new(iter: Iter) -> Self {
+        Self { iter }
+    }
+
+    /// Consume the `NeverDone` and return the inner `AsyncIterator`.
+    pub fn into_inner(self) -> Iter {
+        self.iter
+    }
+
+    /// Return a pinned reference to the inner `AsyncIterator`.
+    pub fn as_pin_mut(self: Pin<&mut Self>) -> Pin<&mut Iter> {
+        self.project().iter
+    }
+}
+
+impl<Iter: AsyncIterator> AsyncIterator for NeverDone<Iter> {
+    type Item = Iter::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> PollNext<Self::Item> {
+        match self.project().iter.poll_next(cx) {
+            PollNext::Done => PollNext::Pending,
+            other => other,
+        }
+    }
+
+    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.project().iter.poll_progress(cx)
+    }
+}
+
+impl<Iter> core::ops::Deref for NeverDone<Iter> {
+    type Target = Iter;
+
+    fn deref(&self) -> &Iter {
+        &self.iter
+    }
+}
+
+impl<Iter> core::ops::DerefMut for NeverDone<Iter> {
+    fn deref_mut(&mut self) -> &mut Iter {
+        &mut self.iter
     }
 }
 
