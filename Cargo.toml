@@ -14,19 +14,25 @@ atomic_refcell = "0.1.14"
 futures = { version = "0.3" }
 tokio = { version = "1.48.0", features = ["full"] }
 
+# This project currently only builds on Jack's forked of Rust that adds
+# `AsyncIterator::poll_progress`, and to run the tests you need forks of
+# `futures` and `tokio` that use `AsyncIterator` instead of `Stream`.
+# https://github.com/oconnor663/rust/pull/2
+# https://github.com/oconnor663/futures-rs/pull/1
+# https://github.com/oconnor663/tokio/pull/1
 [patch.crates-io]
-futures = { path = "/home/jacko/futures-rs/futures" }
-futures-channel = { path = "/home/jacko/futures-rs/futures-channel" }
-futures-core = { path = "/home/jacko/futures-rs/futures-core" }
-futures-executor = { path = "/home/jacko/futures-rs/futures-executor" }
-futures-io = { path = "/home/jacko/futures-rs/futures-io" }
-futures-macro = { path = "/home/jacko/futures-rs/futures-macro" }
-futures-sink = { path = "/home/jacko/futures-rs/futures-sink" }
-futures-task = { path = "/home/jacko/futures-rs/futures-task" }
-futures-test = { path = "/home/jacko/futures-rs/futures-test" }
-futures-util = { path = "/home/jacko/futures-rs/futures-util" }
-tokio = { path = "/home/jacko/tokio/tokio" }
-tokio-macros = { path = "/home/jacko/tokio/tokio-macros" }
-tokio-stream = { path = "/home/jacko/tokio/tokio-stream" }
-tokio-test = { path = "/home/jacko/tokio/tokio-test" }
-tokio-util = { path = "/home/jacko/tokio/tokio-util" }
+futures = { path = "../futures-rs/futures" }
+futures-channel = { path = "../futures-rs/futures-channel" }
+futures-core = { path = "../futures-rs/futures-core" }
+futures-executor = { path = "../futures-rs/futures-executor" }
+futures-io = { path = "../futures-rs/futures-io" }
+futures-macro = { path = "../futures-rs/futures-macro" }
+futures-sink = { path = "../futures-rs/futures-sink" }
+futures-task = { path = "../futures-rs/futures-task" }
+futures-test = { path = "../futures-rs/futures-test" }
+futures-util = { path = "../futures-rs/futures-util" }
+tokio = { path = "../tokio/tokio" }
+tokio-macros = { path = "../tokio/tokio-macros" }
+tokio-stream = { path = "../tokio/tokio-stream" }
+tokio-test = { path = "../tokio/tokio-test" }
+tokio-util = { path = "../tokio/tokio-util" }
