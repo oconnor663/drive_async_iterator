@@ -2,9 +2,9 @@ With the introduction of `poll_progress`, the `.next()` method on `Stream`/`Asyn
 probably going away. The most common use case can be replaced with a `for await` loop, but more
 complicated use cases are hard to translate. This macro aims to make it easier to migrate
 callers who use `.next()` in nontrivial ways. It takes ownership of an `AsyncIterator` and
-defines a `next().await` function within its body. It calls `poll_progress` concurrently with
-the body when an `.await` other than `next().await` is pending, following the new
-`AsyncIterator` contract.
+wraps it in a type with a `.next()` method. It also calls `poll_progress` concurrently with the
+body when an `.await` other than `next().await` is pending, following the new `AsyncIterator`
+contract.
 
 Besides easing migration, this macro solves a [class of
 deadlocks](https://jacko.io/snooze.html) that present-day `.next()` loops are vulnerable to.
@@ -47,7 +47,7 @@ let mut futures = FuturesUnordered::new();
 futures.push(foo());
 futures.push(foo());
 drive!(futures, {
-    while let Some(_) = next().await {
+    while let Some(_) = futures.next().await {
         foo().await; // Not a deadlock!
     }
 });

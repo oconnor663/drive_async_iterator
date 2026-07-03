@@ -9,7 +9,6 @@ edition = "2024"
 
 [dependencies]
 atomic_refcell = "0.1.14"
-drive_async_iterator_impl = { version = "0", path = "impl" }
 
 [dev-dependencies]
 futures = { version = "0.3" }

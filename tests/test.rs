@@ -15,13 +15,13 @@ use tokio::time::{Duration, sleep, timeout};
 #[tokio::test]
 async fn test_drive() {
     let mut finished = false;
-    drive!(futures::stream::iter([1, 2, 3]), {
-        assert_eq!(next().await, Some(1));
-        assert_eq!(next().await, Some(2));
-        assert_eq!(next().await, Some(3));
-        assert_eq!(next().await, None);
+    drive!(iter = futures::stream::iter([1, 2, 3]), {
+        assert_eq!(iter.next().await, Some(1));
+        assert_eq!(iter.next().await, Some(2));
+        assert_eq!(iter.next().await, Some(3));
+        assert_eq!(iter.next().await, None);
         finished = true;
-    });
+    },); // Test that the trailing comma is allowed.
     assert!(finished);
 }
 
@@ -36,10 +36,10 @@ async fn test_mutex() {
     futures.push(foo());
     futures.push(foo());
     drive!(futures, {
-        while let Some(_) = next().await {
+        while let Some(_) = futures.next().await {
             foo().await; // Should not deadlock here!
         }
-    });
+    },); // Test that the trailing comma is allowed.
 }
 
 #[tokio::test]
@@ -56,8 +56,8 @@ async fn test_delayed_next() {
         // `futures` should make progress even before the call to `next`, so `guard` should get
         // dropped promptly. If not, we'll deadlock here.
         let _guard = lock.lock().await;
-        assert_eq!(next().await, Some(42));
-        assert_eq!(next().await, None);
+        assert_eq!(futures.next().await, Some(42));
+        assert_eq!(futures.next().await, None);
     });
 }
 
@@ -75,7 +75,7 @@ async fn test_cancelled_next() {
         loop {
             iterations += 1;
             let one_ms = Duration::from_millis(1);
-            if let Ok(Some(x)) = timeout(one_ms, next()).await {
+            if let Ok(Some(x)) = timeout(one_ms, futures.next()).await {
                 assert_eq!(x, 42);
                 break;
             }
@@ -115,7 +115,7 @@ async fn test_poll_progress_after_item() {
         sender: Some(sender),
     };
     drive!(iter, {
-        assert_eq!(next().await, Some(()));
+        assert_eq!(iter.next().await, Some(()));
         // At this point we've taken an item from the stream, but `poll_progress` hasn't yet been
         // called. (It better for performance if we don't call it every time.)
         assert!(receiver.try_recv().is_err());
@@ -128,10 +128,22 @@ async fn test_poll_progress_after_item() {
 
 #[tokio::test]
 async fn test_concurrent_nexts() {
-    drive!(futures::stream::iter([1, 2]), {
-        let (option1, option2) = futures::future::join(next(), next()).await;
+    drive!(iter = futures::stream::iter([1, 2]), {
+        let (option1, option2) = futures::future::join(iter.next(), iter.next()).await;
         let mut items = [option1.unwrap(), option2.unwrap()];
         items.sort();
         assert_eq!(items, [1, 2]);
+    });
+}
+
+#[tokio::test]
+async fn test_pending_then_done() {
+    // This async generator returns `Pending` at first but soon reports `Done` without ever
+    // yielding an item. Test that that doesn't confuse the state machine.
+    async gen fn foo() {
+        sleep(Duration::from_millis(10)).await;
+    }
+    drive!(iter = foo(), {
+        assert_eq!(iter.next().await, None);
     });
 }
