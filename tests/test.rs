@@ -200,3 +200,24 @@ async fn test_with_mut_after_drop() {
         iter.with_mut(|maybe| assert!(maybe.is_none()));
     });
 }
+
+#[tokio::test]
+#[should_panic]
+async fn test_reentrant_with_mut() {
+    drive!(iter = futures::stream::iter([()]), {
+        iter.with_mut(|_| {
+            iter.with_pin_mut(|_| {});
+        });
+    });
+}
+
+#[tokio::test]
+#[should_panic]
+async fn test_reentrant_with_mut_the_other_way() {
+    // Same as above, but reversing inner and outer just for fun.
+    drive!(iter = futures::stream::iter([()]), {
+        iter.with_pin_mut(|_| {
+            iter.with_mut(|_| {});
+        });
+    });
+}

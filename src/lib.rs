@@ -191,8 +191,8 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
     /// Get the next item from the async iterator.
     ///
     /// Note that this method takes `&self`, and multiple futures are allowed to call it
-    /// concurrently. However, if you manage to call `next` from multiple _threads_, it's likely to
-    /// panic.
+    /// concurrently. However, if you manage to call `next` in _parallel_ from multiple _threads_,
+    /// it's likely to panic.
     ///
     /// Implementation details: `DrivenAsyncIterator` uses an [`AtomicRefCell`] internally, rather
     /// than a [`Mutex`]. This makes it more efficient and also `no_std`-compatible. The downside
@@ -247,6 +247,13 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
         }
     }
 
+    /// Get a temporary pinned reference to the driven async iterator, if it's not yet done.
+    ///
+    /// `drive!` drops its iterator as soon as `poll_next` returns `Done`. If `with_pin_mut` is
+    /// called after that, the closure will receive `None`.
+    ///
+    /// The closure argument is not async, because this reference can't be held across `.await`
+    /// points. If you try to call this reentrantly, it will panic.
     pub fn with_pin_mut<F, Ret>(&self, f: F) -> Ret
     where
         F: FnOnce(Option<Pin<&mut Iter>>) -> Ret,
@@ -255,6 +262,10 @@ impl<Iter: AsyncIterator> DrivenAsyncIterator<'_, '_, Iter> {
         f(state.as_mut().iterator().as_pin_mut())
     }
 
+    /// Get a temporary mutable reference to the driven async iterator, if it's not yet done.
+    ///
+    /// This works like [`with_pin_mut`](DrivenAsyncIterator::with_pin_mut), except that it
+    /// requires the iterator to be [`Unpin`].
     pub fn with_mut<F, Ret>(&self, f: F) -> Ret
     where
         F: FnOnce(Option<&mut Iter>) -> Ret,
