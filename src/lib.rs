@@ -1,4 +1,5 @@
-//! # `drive_async_iterator`
+//! - [GitHub repo](https://github.com/oconnor663/drive_async_iterator)
+//! - [rendered docs](https://jacko.io/docs/drive_async_iterator)
 //!
 //! > **HEADS UP:** This experimental macro currently requires a [fork of
 //! > rustc](https://github.com/oconnor663/rust/pull/2) to build, because it depends on the
