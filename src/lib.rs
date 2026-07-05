@@ -397,6 +397,11 @@ impl<Iter: AsyncIterator, T> DrivenAsyncIterator<'_, '_, Iter, T> {
     ///
     /// The closure argument is not async, because this reference can't be held across `.await`
     /// points. If you try to call this reentrantly, it will panic.
+    ///
+    /// Whenever you call this method, `drive!` will immediately re-poll the iterator, in case it's
+    /// something like `FuturesUnordered` and you just added more work to it. This is kind of a
+    /// hack, and it would be better if collections like `FuturesUnordered` handled their own
+    /// wakeups in these cases, but that's not how things work today.
     pub fn with_pin_mut<F, Ret>(&self, f: F) -> Ret
     where
         F: FnOnce(Option<Pin<&mut Iter>>) -> Ret,
