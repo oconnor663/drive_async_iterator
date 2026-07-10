@@ -189,11 +189,18 @@
 //! # }
 //! ```
 //!
-//! Note that calling `next` on a `NeverDone` async iterator will never return `None`. Instead,
-//! it'll block potentially forever waiting for the iterator to yield more items. That's different
-//! from the behavior of `StreamExt::next` today, which returns `None` immediately in the empty
-//! case. The blocking behavior avoids accidental hot loops in some cases, but it can also cause
-//! some existing callers to block forever unexpectedly.
+//! There's a tricky implementation detail here. `FuturesUnordered` doesn't trigger a wakeup when
+//! `push` takes it from empty to non-empty, and it also doesn't poll the future you pushed until
+//! you call `poll_next`. To make sure we keep looping and poll the new future, `drive!` re-polls
+//! both its iterator and its body anytime `with_mut` or `with_pin_mut` is called. This is a bit of
+//! a hack, and it's possible it could cause accidental hot loops in some cases. It would be better
+//! if `FuturesUnordered` managed these wakeups internally, but that's not how it works today.
+//!
+//! Note also that calling `next` on a `NeverDone` async iterator will never return `None`.
+//! Instead, it'll block potentially forever waiting for the iterator to yield more items. That's
+//! different from the behavior of `StreamExt::next` today, which returns `None` immediately in the
+//! empty case. The blocking behavior avoids accidental hot loops in some cases, but it can also
+//! cause some existing callers to block forever unexpectedly.
 //!
 //! [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 //! [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
