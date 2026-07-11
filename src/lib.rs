@@ -61,7 +61,7 @@
 //! rather, `poll_progress` solves them, and this macro wires `.next()` into `poll_progress`.
 //! Consider this example ([playground link][playground_deadlock]):
 //!
-//! [playground_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=88087e5b73a1697d62e743966dfe3f10>
+//! [playground_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=734b2822e9de973dd68460d59a4458b2>
 //!
 //! ```no_run
 //! # use futures::StreamExt;
@@ -125,7 +125,7 @@
 //! example [`StreamMap`]) is that you can add more work to it while it's running ([playground
 //! link][playground_select]):
 //!
-//! [playground_select]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=46fd466a8a7893a54cf576df84334ef6
+//! [playground_select]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=04a697f12b1db97a2731a2d0885fe607
 //!
 //! ```
 //! # use futures::StreamExt;
