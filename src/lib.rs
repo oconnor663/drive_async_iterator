@@ -17,14 +17,15 @@
 //! A caller that previously used `Stream`/`StreamExt` this way...
 //!
 //! ```
-//! # use futures::stream::{self, StreamExt};
+//! # #![feature(gen_blocks)]
+//! # #![feature(yield_expr)]
 //! # use std::pin::pin;
+//! # use futures::StreamExt;
+//! # async gen fn some_stream() -> i32 { yield 42; }
 //! # #[tokio::main]
 //! # async fn main() {
-//! let mut my_stream = pin!(stream::iter([1, 2, 3]));
-//! assert_eq!(my_stream.next().await, Some(1));
-//! assert_eq!(my_stream.next().await, Some(2));
-//! assert_eq!(my_stream.next().await, Some(3));
+//! let mut my_stream = pin!(some_stream());
+//! assert_eq!(my_stream.next().await, Some(42));
 //! assert_eq!(my_stream.next().await, None);
 //! # }
 //! ```
@@ -33,23 +34,25 @@
 //!
 //! ```
 //! # #![feature(async_iterator)]
-//! # #![feature(async_iter_from_iter)]
-//! # use std::async_iter;
+//! # #![feature(gen_blocks)]
+//! # #![feature(yield_expr)]
+//! # use std::pin::pin;
+//! # async gen fn some_stream() -> i32 { yield 42; }
 //! # #[tokio::main]
 //! # async fn main() {
 //! use drive_async_iterator::drive;
 //!
-//! drive!(my_stream = async_iter::from_iter([1, 2, 3]), {
-//!     assert_eq!(my_stream.next().await, Some(1));
-//!     assert_eq!(my_stream.next().await, Some(2));
-//!     assert_eq!(my_stream.next().await, Some(3));
+//! drive!(my_stream = some_stream(), {
+//!     assert_eq!(my_stream.next().await, Some(42));
 //!     assert_eq!(my_stream.next().await, None);
 //! });
 //! # }
 //! ```
 //!
-//! There are two ways to invoke the macro. As above, there's `drive!(<name> = <iter>, <body>)`.
-//! And for cases where you would write `<name> = <name>`, there's the shorthand `drive!(<name>, <body>)`.
+//! `drive!` takes ownership of an `AsyncIterator` and provides a handle that has a `next` method
+//! (and a couple others, see below). There are two ways to invoke the macro. As above, there's
+//! `drive!(<name> = <iter>, <body>)`. And for cases where you would write `<name> = <name>`,
+//! there's the shorthand `drive!(<name>, <body>)`.
 //!
 //! ## Fixing deadlocks
 //!
@@ -67,7 +70,7 @@
 //! # use tokio::time::{Duration, sleep};
 //! // This function acquires a static `Mutex` and does a brief sleep,
 //! // simulating some sort of IO with a shared resource.
-//! async fn foo() {
+//! async fn do_work() {
 //!     static LOCK: Mutex<()> = Mutex::const_new(());
 //!     let _guard = LOCK.lock().await;
 //!     sleep(Duration::from_millis(10)).await;
@@ -76,17 +79,17 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! let mut futures = FuturesUnordered::new();
-//! futures.push(foo());
-//! futures.push(foo());
+//! futures.push(do_work());
+//! futures.push(do_work());
 //! while let Some(_) = futures.next().await {
-//!     foo().await; // Deadlock!
+//!     do_work().await; // Deadlock!
 //! }
 //! # }
 //! ```
 //!
-//! That example deadlocks because one of the `foo` futures in the [`FuturesUnordered`] is holding
-//! the `LOCK`, but it's not making progress. Using `drive!` the same loop runs smoothly, because
-//! `FuturesUnordered` can poll its contents concurrently with the loop body:
+//! That example deadlocks because one of the `do_work` futures in the [`FuturesUnordered`] is
+//! holding the `LOCK`, but it's not making progress. Using `drive!` the same loop runs smoothly,
+//! because `FuturesUnordered` can poll its contents concurrently with the loop body:
 //!
 //! ```
 //! # #![feature(async_iterator)]
@@ -97,7 +100,7 @@
 //! # use tokio::time::{Duration, sleep};
 //! # // This function acquires a static `Mutex` and does a brief sleep,
 //! # // simulating some sort of IO with a shared resource.
-//! # async fn foo() {
+//! # async fn do_work() {
 //! #     static LOCK: Mutex<()> = Mutex::const_new(());
 //! #     let _guard = LOCK.lock().await;
 //! #     sleep(Duration::from_millis(10)).await;
@@ -105,11 +108,11 @@
 //! # #[tokio::main]
 //! # async fn main() {
 //! let mut futures = FuturesUnordered::new();
-//! futures.push(foo());
-//! futures.push(foo());
+//! futures.push(do_work());
+//! futures.push(do_work());
 //! drive!(futures, {
 //!     while let Some(_) = futures.next().await {
-//!         foo().await; // Not a deadlock!
+//!         do_work().await; // Not a deadlock!
 //!     }
 //! });
 //! # }
